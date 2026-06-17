@@ -1,15 +1,32 @@
-## ISP
-
-```bash
+=============================ISP
 hostnamectl set-hostname isp.au-team.irpo
+
+mkdir -p /etc/net/ifaces/{ens18,ens19,ens20}
+
+cat > /etc/net/ifaces/ens18/options << 'EOF'
+TYPE=eth
+BOOTPROTO=dhcp
+ONBOOT=yes
+EOF
+
+cat > /etc/net/ifaces/ens19/options << 'EOF'
+TYPE=eth
+BOOTPROTO=static
+ONBOOT=yes
+EOF
+
+cat > /etc/net/ifaces/ens20/options << 'EOF'
+TYPE=eth
+BOOTPROTO=static
+ONBOOT=yes
+EOF
+
+echo '172.16.1.1/28' > /etc/net/ifaces/ens19/ipv4address
+echo '172.16.2.1/28' > /etc/net/ifaces/ens20/ipv4address
 
 sysctl -w net.ipv4.ip_forward=1
 
-ip addr add 172.16.1.1/28 dev ens19
-ip addr add 172.16.2.1/28 dev ens20
-ip link set ens19 up
-ip link set ens20 up
-
+apt-get update
 apt-get install -y nftables
 
 cat > /etc/nftables/nftables.nft << 'EOF'
@@ -24,8 +41,8 @@ table ip nat {
 EOF
 
 systemctl enable --now nftables
-
-======HQ-RTR=======
+systemctl restart nftables
+ ============================= HQ-RTR 
 hostnamectl set-hostname hq-rtr.au-team.irpo
 
 sysctl -w net.ipv4.ip_forward=1
@@ -45,7 +62,22 @@ ip tunnel add gre1 mode gre local 172.16.1.2 remote 172.16.2.2 ttl 64
 ip addr add 10.10.10.1/30 dev gre1
 ip link set gre1 up
 
-====BR-RTR====
+apt-get update
+apt-get install -y dhcp-server nftables
+
+cat > /etc/dhcp/dhcpd.conf << 'EOF'
+default-lease-time 600;
+max-lease-time 7200;
+
+subnet 192.168.200.0 netmask 255.255.255.224 {
+  range 192.168.200.10 192.168.200.50;
+  option routers 192.168.200.1;
+  option domain-name-servers 192.168.100.2;
+}
+EOF
+
+systemctl enable --now dhcpd
+============================= BR-RTR
 hostnamectl set-hostname br-rtr.au-team.irpo
 
 sysctl -w net.ipv4.ip_forward=1
@@ -59,7 +91,21 @@ ip tunnel add gre1 mode gre local 172.16.2.2 remote 172.16.1.2 ttl 64
 ip addr add 10.10.10.2/30 dev gre1
 ip link set gre1 up
 
-===HQ-SRV===
+apt-get install -y nftables
+
+cat > /etc/nftables/nftables.nft << 'EOF'
+flush ruleset
+
+table ip nat {
+  chain postrouting {
+    type nat hook postrouting priority srcnat;
+    ip saddr 192.168.3.0/28 oifname "ens18" masquerade
+  }
+}
+EOF
+
+systemctl enable --now nftables
+ HQ-SRV (DNS + SSH)
 hostnamectl set-hostname hq-srv.au-team.irpo
 
 ip addr add 192.168.100.2/27 dev ens18
@@ -68,9 +114,9 @@ ip route add default via 192.168.100.1
 useradd -m -u 2026 sshuser
 echo "sshuser:P@ssw0rd" | chpasswd
 
+apt-get update
 apt-get install -y openssh-server bind9
-
-===BR-SRV===
+ BR-SRV
 hostnamectl set-hostname br-srv.au-team.irpo
 
 ip addr add 192.168.3.2/28 dev ens18
@@ -80,27 +126,26 @@ useradd -m -u 2026 sshuser
 echo "sshuser:P@ssw0rd" | chpasswd
 
 apt-get install -y openssh-server
-
-==HQ-CLI==
+============================= HQ-CLI
 hostnamectl set-hostname hq-cli.au-team.irpo
 
 dhclient ens18
 timedatectl set-timezone Europe/Moscow
 
-
-====MODULE 2====
-
+MODULE2
 timedatectl set-timezone Europe/Moscow
 
 useradd -m -u 2026 sshuser
 echo "sshuser:P@ssw0rd" | chpasswd
 
-apt-get install -y openssh-server chrony ansible docker.io
+apt-get install -y openssh-server chrony
 
 sed -i 's/#Port 22/Port 2026/' /etc/ssh/sshd_config
+sed -i 's/#MaxAuthTries.*/MaxAuthTries 2/' /etc/ssh/sshd_config
+sed -i 's/#PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
+
+echo "Banner /etc/ssh/banner" >> /etc/ssh/sshd_config
+echo "Authorized access only" > /etc/ssh/banner
+
 systemctl restart sshd
-
-systemctl enable --now docker
-
-wget https://browser.yandex.ru/download?os=linux -O yandex.deb
-apt install -y ./yandex.deb
+systemctl enable --now chronyd
